@@ -1,13 +1,13 @@
 name = "freemail"
 main = "src/server.js"
 compatibility_date = "2024-01-01"
-keep_vars = true
+keep_vars = false
 
 # D1 数据库绑定
 [[d1_databases]]
 binding = "TEMP_MAIL_DB"
 database_name = "mail_free_db"
-database_id = "b6711963-dd4b-4071-a531-512317880c19"
+database_id = "316a5722-8d44-4f03-8f87-c796de19e9ca"
 
 # 环境变量
 # 敏感项 ADMIN_PASSWORD / JWT_TOKEN 请在 Cloudflare 后台设为 Secret，不要写入本文件
