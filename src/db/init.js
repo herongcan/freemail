@@ -48,6 +48,7 @@ async function performFirstTimeSetup(db) {
     // 所有5个必要表都存在，执行字段迁移
     await migrateMailboxesFields(db);
     await migrateSentEmailsFields(db);
+    await migrateMessagesBodyFields(db);
     return;
   } catch (e) {
     // 有表不存在，继续初始化
@@ -56,7 +57,7 @@ async function performFirstTimeSetup(db) {
   
   // 创建表结构（仅在表不存在时）- 包含新字段 forward_to 和 is_favorite
   await db.exec("CREATE TABLE IF NOT EXISTS mailboxes (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL UNIQUE, local_part TEXT NOT NULL, domain TEXT NOT NULL, password_hash TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, last_accessed_at TEXT, expires_at TEXT, is_pinned INTEGER DEFAULT 0, can_login INTEGER DEFAULT 0, forward_to TEXT DEFAULT NULL, is_favorite INTEGER DEFAULT 0);");
-  await db.exec("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mailbox_id INTEGER NOT NULL, sender TEXT NOT NULL, to_addrs TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL, verification_code TEXT, preview TEXT, r2_bucket TEXT NOT NULL DEFAULT 'mail-eml', r2_object_key TEXT NOT NULL DEFAULT '', received_at TEXT DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id));");
+  await db.exec("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mailbox_id INTEGER NOT NULL, sender TEXT NOT NULL, to_addrs TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL, verification_code TEXT, preview TEXT, r2_bucket TEXT NOT NULL DEFAULT 'mail-eml', r2_object_key TEXT NOT NULL DEFAULT '', content TEXT, html_content TEXT, received_at TEXT DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id));");
   await db.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT, role TEXT NOT NULL DEFAULT 'user', can_send INTEGER NOT NULL DEFAULT 0, mailbox_limit INTEGER NOT NULL DEFAULT 10, created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
   await db.exec("CREATE TABLE IF NOT EXISTS user_mailboxes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, mailbox_id INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, is_pinned INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, mailbox_id), FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE);");
   await db.exec("CREATE TABLE IF NOT EXISTS sent_emails (id INTEGER PRIMARY KEY AUTOINCREMENT, resend_id TEXT, from_name TEXT, from_addr TEXT NOT NULL, to_addrs TEXT NOT NULL, subject TEXT NOT NULL, html_content TEXT, text_content TEXT, status TEXT DEFAULT 'queued', scheduled_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, provider TEXT NOT NULL DEFAULT 'resend');");
@@ -91,6 +92,30 @@ async function createIndexes(db) {
  * @param {object} db - 数据库连接对象
  * @returns {Promise<void>}
  */
+/**
+ * 迁移 messages 表字段：补充正文列
+ * 说明：未启用 R2 时，完整正文改存 D1，读取端已有回退逻辑依赖这两个字段。
+ * @param {object} db - 数据库连接对象
+ * @returns {Promise<void>}
+ */
+async function migrateMessagesBodyFields(db) {
+  try {
+    const columns = await db.prepare("PRAGMA table_info(messages)").all();
+    const columnNames = (columns.results || []).map(c => c.name);
+
+    if (!columnNames.includes('content')) {
+      await db.exec("ALTER TABLE messages ADD COLUMN content TEXT;");
+      console.log('已添加 messages.content 字段');
+    }
+    if (!columnNames.includes('html_content')) {
+      await db.exec("ALTER TABLE messages ADD COLUMN html_content TEXT;");
+      console.log('已添加 messages.html_content 字段');
+    }
+  } catch (error) {
+    console.error('messages 字段迁移失败:', error);
+  }
+}
+
 async function migrateMailboxesFields(db) {
   try {
     const columns = await db.prepare("PRAGMA table_info(mailboxes)").all();
@@ -173,6 +198,8 @@ export async function setupDatabase(db) {
       preview TEXT,
       r2_bucket TEXT NOT NULL DEFAULT 'mail-eml',
       r2_object_key TEXT NOT NULL DEFAULT '',
+      content TEXT,
+      html_content TEXT,
       received_at TEXT DEFAULT CURRENT_TIMESTAMP,
       is_read INTEGER DEFAULT 0,
       FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id)

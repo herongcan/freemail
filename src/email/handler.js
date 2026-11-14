@@ -85,6 +85,9 @@ export async function handleEmailEvent(message, env, ctx) {
       }
     } catch (e) { console.error('R2 put failed:', e); }
 
+    // 未绑定 R2 时清空对象键：正文已存 D1，此时不应再给出无法下载的 .eml 入口
+    if (!r2) objectKey = '';
+
     const preview = String(
       (textContent?.trim() ? textContent : (htmlContent || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) || ''
     ).slice(0, 120);
@@ -119,10 +122,24 @@ export async function handleEmailEvent(message, env, ctx) {
       }
     } catch (_) { toAddrs = resolvedRecipient || toHeader || ''; }
 
-    await DB.prepare(`
-      INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(mailboxId, sender, String(toAddrs || ''), subject || '(无主题)', verificationCode || null, preview || null, 'mail-eml', objectKey || '').run();
+    // 完整正文落库：未启用 R2 时这是正文的唯一来源，读取端已有回退逻辑消费这两列
+    // 单列限长防止超出 D1 单行大小限制（超长邮件截断，不影响验证码与关键信息）
+    const storedText = String(textContent || '').slice(0, 100000);
+    const storedHtml = String(htmlContent || '').slice(0, 200000);
+
+    try {
+      await DB.prepare(`
+        INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key, content, html_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(mailboxId, sender, String(toAddrs || ''), subject || '(无主题)', verificationCode || null, preview || null, 'mail-eml', objectKey || '', storedText || null, storedHtml || null).run();
+    } catch (insertErr) {
+      // 老库未迁移（缺 content 列）时降级为原写入方式，保证邮件不丢
+      console.error('正文落库失败，降级写入:', insertErr.message);
+      await DB.prepare(`
+        INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(mailboxId, sender, String(toAddrs || ''), subject || '(无主题)', verificationCode || null, preview || null, 'mail-eml', objectKey || '').run();
+    }
   } catch (err) {
     console.error('Email event handling error:', err);
   }
