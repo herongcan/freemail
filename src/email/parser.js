@@ -6,16 +6,19 @@
 import PostalMime from 'postal-mime';
 
 /**
- * 解析邮件正文，提取文本和HTML内容
+ * 解析邮件正文，提取文本、HTML 与已解码的主题
+ * 说明：message.headers 取到的是 RFC 2047 原始编码串（如 =?UTF-8?B?xxx?=），
+ * 需借用 postal-mime 解码后才能正常显示中文主题。
  * @param {string} raw - 原始邮件内容 (EML 格式)
- * @returns {Promise<object>} 包含 text 和 html 属性的对象
+ * @returns {Promise<object>} 包含 text、html、subject 属性的对象
  */
 export async function parseEmailBody(raw) {
-  if (!raw) return { text: '', html: '' };
+  if (!raw) return { text: '', html: '', subject: '' };
   const email = await PostalMime.parse(raw);
   return {
     text: email.text || '',
     html: email.html || '',
+    subject: email.subject || '',
   };
 }
 

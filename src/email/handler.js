@@ -53,6 +53,7 @@ export async function handleEmailEvent(message, env, ctx) {
 
     let textContent = '';
     let htmlContent = '';
+    let decodedSubject = '';
     let rawBuffer = null;
     try {
       const resp = new Response(message.raw);
@@ -61,6 +62,7 @@ export async function handleEmailEvent(message, env, ctx) {
       const parsed = await parseEmailBody(rawText);
       textContent = parsed.text || '';
       htmlContent = parsed.html || '';
+      decodedSubject = parsed.subject || '';
       if (!textContent && !htmlContent) textContent = (rawText || '').slice(0, 100000);
     } catch (_) { }
 
@@ -91,8 +93,11 @@ export async function handleEmailEvent(message, env, ctx) {
     const preview = String(
       (textContent?.trim() ? textContent : (htmlContent || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) || ''
     ).slice(0, 120);
+    // 主题优先用解码后的值，避免中文主题显示成 =?UTF-8?B?...?=
+    const finalSubject = decodedSubject || subject || '(无主题)';
+
     let verificationCode = '';
-    try { verificationCode = extractVerificationCode({ subject, text: textContent, html: htmlContent }); } catch (_) { }
+    try { verificationCode = extractVerificationCode({ subject: finalSubject, text: textContent, html: htmlContent }); } catch (_) { }
 
     const resMb = await DB.prepare('SELECT id FROM mailboxes WHERE address = ?').bind(mailbox.toLowerCase()).all();
     let mailboxId;
@@ -131,14 +136,14 @@ export async function handleEmailEvent(message, env, ctx) {
       await DB.prepare(`
         INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key, content, html_content)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(mailboxId, sender, String(toAddrs || ''), subject || '(无主题)', verificationCode || null, preview || null, 'mail-eml', objectKey || '', storedText || null, storedHtml || null).run();
+      `).bind(mailboxId, sender, String(toAddrs || ''), finalSubject, verificationCode || null, preview || null, 'mail-eml', objectKey || '', storedText || null, storedHtml || null).run();
     } catch (insertErr) {
       // 老库未迁移（缺 content 列）时降级为原写入方式，保证邮件不丢
       console.error('正文落库失败，降级写入:', insertErr.message);
       await DB.prepare(`
         INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(mailboxId, sender, String(toAddrs || ''), subject || '(无主题)', verificationCode || null, preview || null, 'mail-eml', objectKey || '').run();
+      `).bind(mailboxId, sender, String(toAddrs || ''), finalSubject, verificationCode || null, preview || null, 'mail-eml', objectKey || '').run();
     }
   } catch (err) {
     console.error('Email event handling error:', err);
