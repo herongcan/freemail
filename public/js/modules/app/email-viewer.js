@@ -7,6 +7,18 @@ import { escapeHtml, escapeAttr, extractCode } from './ui-helpers.js';
 import { getEmailFromCache, setEmailCache } from './email-list.js';
 
 /**
+ * 格式化附件体积
+ * @param {number} bytes - 字节数
+ * @returns {string} 可读体积
+ */
+function formatAttachmentSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
  * 显示邮件详情
  * @param {number} id - 邮件ID
  * @param {object} elements - DOM 元素
@@ -52,7 +64,22 @@ export async function showEmailDetail(id, elements, api, showToast) {
       bodyHtml = `<div class="email-content-area"><pre class="email-content-text" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(email.content || '')}</pre></div>`;
     }
 
-    modalContent.innerHTML = `<div class="email-detail-container">${metaHtml}${codeHtml}${bodyHtml}</div>`;
+    // 附件清单：非内嵌附件（以及超限未内联的图片）提供下载入口
+    let attHtml = '';
+    const atts = Array.isArray(email.attachments) ? email.attachments : [];
+    if (atts.length) {
+      const chips = atts.map(a => {
+        const name = escapeHtml(a.filename || '附件');
+        const size = a.size ? ` <span style="opacity:.6">${formatAttachmentSize(a.size)}</span>` : '';
+        return `<a href="/api/attachment/${encodeURIComponent(a.token)}" target="_blank" rel="noopener noreferrer"
+          style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border,#333);
+          border-radius:8px;text-decoration:none;color:inherit;font-size:13px;max-width:100%;overflow:hidden;
+          text-overflow:ellipsis;white-space:nowrap">${name}${size}</a>`;
+      }).join('');
+      attHtml = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px">${chips}</div>`;
+    }
+
+    modalContent.innerHTML = `<div class="email-detail-container">${metaHtml}${codeHtml}${bodyHtml}${attHtml}</div>`;
     modal.classList.add('show');
   } catch(e) {
     showToast(e.message || '加载失败', 'error');

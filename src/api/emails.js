@@ -35,6 +35,41 @@ async function loadEmailBodyFromR2(r2, objectKey) {
   }
 }
 
+// 读取某封邮件的附件；正文里的 cid: 引用需要它才能渲染成图片。
+async function loadAttachments(db, messageId) {
+  try {
+    const { results } = await db.prepare(
+      'SELECT token, filename, mime_type, content_id, size, is_inline, content FROM attachments WHERE message_id = ? ORDER BY id'
+    ).bind(messageId).all();
+    return results || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+// 将 HTML 中的 cid: 引用替换为 data URL，避免内嵌图片显示为裂图。
+function inlineCidImages(html, attachments) {
+  let out = String(html || '');
+  if (!out || !out.includes('cid:')) return out;
+  for (const att of attachments) {
+    if (!att.content_id || !att.content || !att.mime_type) continue;
+    const cid = String(att.content_id).replace(/^</, '').replace(/>$/, '');
+    if (!cid) continue;
+    const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`cid:${escaped}`, 'gi'), `data:${att.mime_type};base64,${att.content}`);
+  }
+  // 兜底：超大附件未存内容时 cid 无法解析，去掉 src 属性让 alt 文本兜底，不留破图标
+  return out.replace(/\ssrc=(["'])cid:[^"']*\1/gi, '');
+}
+
+// base64 解码为字节数组（Workers 无 Buffer）
+function base64ToBytes(b64) {
+  const binary = atob(String(b64 || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 export async function handleEmailsApi(request, db, url, path, options) {
   const isMock = !!options.mockOnly;
   const isMailboxOnly = !!options.mailboxOnly;
@@ -171,6 +206,33 @@ export async function handleEmailsApi(request, db, url, path, options) {
     }
   }
 
+  // 附件下载：token 为随机串，不可枚举；仍需登录态校验由上层中间件完成
+  if (request.method === 'GET' && path.startsWith('/api/attachment/')) {
+    const token = path.split('/')[3];
+    if (!token) return errorResponse('缺少附件标识', 400);
+    try {
+      const row = await db.prepare(
+        'SELECT filename, mime_type, content FROM attachments WHERE token = ? LIMIT 1'
+      ).bind(token).first();
+      if (!row) return errorResponse('附件不存在', 404);
+      if (!row.content) return errorResponse('附件内容未保存', 410);
+
+      const bytes = base64ToBytes(row.content);
+      const filename = row.filename || 'attachment';
+      const asciiName = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+      const headers = new Headers({
+        'Content-Type': row.mime_type || 'application/octet-stream',
+        'Content-Length': String(bytes.length),
+        'Content-Disposition': `inline; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      return new Response(bytes, { headers });
+    } catch (e) {
+      return errorResponse('附件读取失败', 500);
+    }
+  }
+
   if (request.method === 'GET' && path.startsWith('/api/email/')) {
     const emailId = path.split('/')[3];
     if (isMock) return Response.json(buildMockEmailDetail(emailId));
@@ -200,10 +262,20 @@ export async function handleEmailsApi(request, db, url, path, options) {
         } catch (_) { }
       }
 
+      const attachments = await loadAttachments(db, emailId);
+      if (html_content) html_content = inlineCidImages(html_content, attachments);
+
       return Response.json({
         ...row,
         content,
         html_content,
+        attachments: attachments.map(a => ({
+          token: a.token,
+          filename: a.filename || '',
+          mime_type: a.mime_type || 'application/octet-stream',
+          size: a.size || 0,
+          is_inline: !!a.is_inline
+        })),
         download: row.r2_object_key ? `/api/email/${emailId}/download` : ''
       });
     } catch (_) {
@@ -228,6 +300,7 @@ export async function handleEmailsApi(request, db, url, path, options) {
 
     try {
       const row = await db.prepare('SELECT r2_object_key FROM messages WHERE id = ?').bind(emailId).first();
+      try { await db.prepare('DELETE FROM attachments WHERE message_id = ?').bind(emailId).run(); } catch (_) { }
       const result = await db.prepare('DELETE FROM messages WHERE id = ?').bind(emailId).run();
       const deleted = (result?.meta?.changes || 0) > 0;
 

@@ -54,6 +54,7 @@ export async function handleEmailEvent(message, env, ctx) {
     let textContent = '';
     let htmlContent = '';
     let decodedSubject = '';
+    let parsedAttachments = [];
     let rawBuffer = null;
     try {
       const resp = new Response(message.raw);
@@ -63,6 +64,7 @@ export async function handleEmailEvent(message, env, ctx) {
       textContent = parsed.text || '';
       htmlContent = parsed.html || '';
       decodedSubject = parsed.subject || '';
+      parsedAttachments = Array.isArray(parsed.attachments) ? parsed.attachments : [];
       if (!textContent && !htmlContent) textContent = (rawText || '').slice(0, 100000);
     } catch (_) { }
 
@@ -132,18 +134,46 @@ export async function handleEmailEvent(message, env, ctx) {
     const storedText = String(textContent || '').slice(0, 100000);
     const storedHtml = String(htmlContent || '').slice(0, 200000);
 
+    let messageId = null;
     try {
-      await DB.prepare(`
+      const inserted = await DB.prepare(`
         INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key, content, html_content)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(mailboxId, sender, String(toAddrs || ''), finalSubject, verificationCode || null, preview || null, 'mail-eml', objectKey || '', storedText || null, storedHtml || null).run();
+      messageId = inserted?.meta?.last_row_id || null;
     } catch (insertErr) {
       // 老库未迁移（缺 content 列）时降级为原写入方式，保证邮件不丢
       console.error('正文落库失败，降级写入:', insertErr.message);
-      await DB.prepare(`
+      const inserted = await DB.prepare(`
         INSERT INTO messages (mailbox_id, sender, to_addrs, subject, verification_code, preview, r2_bucket, r2_object_key)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(mailboxId, sender, String(toAddrs || ''), finalSubject, verificationCode || null, preview || null, 'mail-eml', objectKey || '').run();
+      messageId = inserted?.meta?.last_row_id || null;
+    }
+
+    // 附件落库：正文 HTML 里的 <img src="cid:..."> 依赖它，否则图片全是裂图
+    if (messageId && parsedAttachments.length) {
+      for (const att of parsedAttachments) {
+        try {
+          const token = (globalThis.crypto?.randomUUID && crypto.randomUUID().replace(/-/g, '')) ||
+            `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+          await DB.prepare(`
+            INSERT INTO attachments (message_id, token, filename, mime_type, content_id, size, is_inline, content)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            messageId,
+            token,
+            att.filename || '',
+            att.mimeType || 'application/octet-stream',
+            att.contentId || '',
+            att.size || 0,
+            att.isInline ? 1 : 0,
+            att.base64 || null
+          ).run();
+        } catch (attErr) {
+          console.error('附件落库失败:', attErr.message);
+        }
+      }
     }
   } catch (err) {
     console.error('Email event handling error:', err);

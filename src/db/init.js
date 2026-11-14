@@ -49,6 +49,7 @@ async function performFirstTimeSetup(db) {
     await migrateMailboxesFields(db);
     await migrateSentEmailsFields(db);
     await migrateMessagesBodyFields(db);
+    await migrateAttachmentsTable(db);
     return;
   } catch (e) {
     // 有表不存在，继续初始化
@@ -64,6 +65,9 @@ async function performFirstTimeSetup(db) {
   
   // 创建索引
   await createIndexes(db);
+
+  // 附件表（含内嵌图片），一并确保存在
+  await migrateAttachmentsTable(db);
 }
 
 /**
@@ -84,6 +88,7 @@ async function createIndexes(db) {
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_sent_emails_resend_id ON sent_emails(resend_id);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_sent_emails_status_created ON sent_emails(status, created_at DESC);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_sent_emails_from_addr ON sent_emails(from_addr);`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);`);
 }
 
 /**
@@ -92,6 +97,37 @@ async function createIndexes(db) {
  * @param {object} db - 数据库连接对象
  * @returns {Promise<void>}
  */
+/**
+ * 迁移/创建附件表
+ * 说明：邮件内嵌图片以 cid: 引用附件，附件不落库则正文里的图片必然是裂图。
+ * 正文与附件分表存放，避免单行超出 D1 行大小上限。
+ * @param {object} db - 数据库连接对象
+ * @returns {Promise<void>}
+ */
+async function migrateAttachmentsTable(db) {
+  try {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER NOT NULL,
+        token TEXT NOT NULL,
+        filename TEXT,
+        mime_type TEXT,
+        content_id TEXT,
+        size INTEGER DEFAULT 0,
+        is_inline INTEGER DEFAULT 0,
+        content TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+      );
+    `);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_token ON attachments(token);`);
+  } catch (error) {
+    console.error('attachments 表迁移失败:', error);
+  }
+}
+
 /**
  * 迁移 messages 表字段：补充正文列
  * 说明：未启用 R2 时，完整正文改存 D1，读取端已有回退逻辑依赖这两个字段。

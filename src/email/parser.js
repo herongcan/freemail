@@ -5,20 +5,71 @@
 
 import PostalMime from 'postal-mime';
 
+// 单个附件落库上限：base64 后约为原始的 1.37 倍，1MB 可安全落在 D1 单行 2MB 限制内
+const MAX_ATTACHMENT_BYTES = 1024 * 1024;
+
 /**
- * 解析邮件正文，提取文本、HTML 与已解码的主题
+ * 将二进制内容编码为 base64（Workers 无 Buffer，分块拼串避免超长参数栈溢出）
+ * @param {Uint8Array} bytes - 字节数组
+ * @returns {string} base64 字符串
+ */
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/**
+ * 归一化 MIME 部件内容为字节数组
+ * @param {ArrayBuffer|Uint8Array|string} content - 部件内容
+ * @returns {Uint8Array|null} 字节数组
+ */
+function toBytes(content) {
+  if (!content) return null;
+  if (content instanceof ArrayBuffer) return new Uint8Array(content);
+  if (ArrayBuffer.isView(content)) return new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
+  if (typeof content === 'string') return new TextEncoder().encode(content);
+  return null;
+}
+
+/**
+ * 解析邮件正文与附件，提取文本、HTML、已解码主题和内嵌图片
  * 说明：message.headers 取到的是 RFC 2047 原始编码串（如 =?UTF-8?B?xxx?=），
- * 需借用 postal-mime 解码后才能正常显示中文主题。
+ * 需借用 postal-mime 解码后才能正常显示中文主题；
+ * HTML 中的内嵌图片是 cid: 引用，必须连同附件一起保存才能显示。
  * @param {string} raw - 原始邮件内容 (EML 格式)
- * @returns {Promise<object>} 包含 text、html、subject 属性的对象
+ * @returns {Promise<object>} 包含 text、html、subject、attachments 属性的对象
  */
 export async function parseEmailBody(raw) {
-  if (!raw) return { text: '', html: '', subject: '' };
+  if (!raw) return { text: '', html: '', subject: '', attachments: [] };
   const email = await PostalMime.parse(raw);
+
+  const attachments = [];
+  for (const part of (email.attachments || [])) {
+    try {
+      const bytes = toBytes(part.content);
+      if (!bytes || bytes.length === 0) continue;
+      const disposition = String(part.disposition || '').toLowerCase();
+      attachments.push({
+        filename: part.filename || '',
+        mimeType: part.mimeType || 'application/octet-stream',
+        contentId: String(part.contentId || '').replace(/^</, '').replace(/>$/, ''),
+        size: bytes.length,
+        isInline: disposition === 'inline' || !!part.contentId || !!part.related,
+        // 超过上限的附件只留元信息，正文里会降级为下载入口，不至于撑爆 D1 单行
+        base64: bytes.length <= MAX_ATTACHMENT_BYTES ? bytesToBase64(bytes) : '',
+      });
+    } catch (_) { }
+  }
+
   return {
     text: email.text || '',
     html: email.html || '',
     subject: email.subject || '',
+    attachments,
   };
 }
 
